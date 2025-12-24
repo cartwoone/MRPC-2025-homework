@@ -200,10 +200,22 @@ inline void Astarpath::AstarGetSucc(MappingNodePtr currentPtr,
 }
 
 double Astarpath::getHeu(MappingNodePtr node1, MappingNodePtr node2) {
+  /**
+   *
+   * STEP 1.1: 完成 Astarpath::getHeu
+   * 使用欧几里得距离作为启发函数，添加tie_breaker
+   *
+   * **/
+  double dx = node1->index(0) - node2->index(0);
+  double dy = node1->index(1) - node2->index(1);
+  double dz = node1->index(2) - node2->index(2);
   
-  // 使用数字距离和一种类型的tie_breaker
-  double heu;
-  double tie_breaker;
+  // 使用欧几里得距离
+  double heu = sqrt(dx * dx + dy * dy + dz * dz);
+  
+  // 添加tie_breaker，乘以一个很小的系数防止影响距离估计
+  double tie_breaker = 1.0 + 0.001;
+  heu *= tie_breaker;
   
   return heu;
 }
@@ -261,11 +273,28 @@ bool Astarpath::AstarSearch(Vector3d start_pt, Vector3d end_pt) {
 
   while (!Openset.empty()) {
     //1.弹出g+h最小的节点
-    //????
+    // 从open set中获取f值最小的节点
+    currentPtr = Openset.begin()->second;
+    Openset.erase(Openset.begin());
+    
     //2.判断是否是终点
-    //????
+    // 如果当前节点是目标节点，搜索完成
+    if (currentPtr->index == goalIdx) {
+      terminatePtr = currentPtr;
+      ros::Time time_2 = ros::Time::now();
+      if ((time_2 - time_1).toSec() > 0.1)
+        ROS_WARN("Time consume in Astar path finding is %f",
+                 (time_2 - time_1).toSec());
+      return true;
+    }
+    
     //3.拓展当前节点
-    //????
+    // 获取当前节点的所有邻居节点
+    AstarGetSucc(currentPtr, neighborPtrSets, edgeCostSets);
+    
+    // 将当前节点标记为已关闭
+    currentPtr->id = -1;
+    
     for(unsigned int i=0;i<neighborPtrSets.size();i++)
     {
       
@@ -280,12 +309,34 @@ bool Astarpath::AstarSearch(Vector3d start_pt, Vector3d end_pt) {
       if(neighborPtr->id==0)
       {
         //4.填写信息，完成更新
-        //???
+        // 新发现的节点，加入open set
+        neighborPtr->g_score = tentative_g_score;
+        neighborPtr->Father = currentPtr;
+        neighborPtr->f_score = tentative_g_score + getHeu(neighborPtr, endPtr);
+        neighborPtr->id = 1;
+        Openset.insert(make_pair(neighborPtr->f_score, neighborPtr));
         continue;
       }
       else if(neighborPtr->id==1)
       {
-        //???
+        // 已在open set中，检查是否需要更新路径
+        if(tentative_g_score < neighborPtr->g_score) {
+          // 找到更优路径，更新节点
+          // 先从open set中移除
+          auto it = Openset.find(neighborPtr->f_score);
+          while(it != Openset.end() && it->second != neighborPtr) {
+            ++it;
+          }
+          if(it != Openset.end()) {
+            Openset.erase(it);
+          }
+          
+          // 更新节点信息
+          neighborPtr->g_score = tentative_g_score;
+          neighborPtr->Father = currentPtr;
+          neighborPtr->f_score = tentative_g_score + getHeu(neighborPtr, endPtr);
+          Openset.insert(make_pair(neighborPtr->f_score, neighborPtr));
+        }
       continue;
       }
     }
@@ -302,19 +353,28 @@ bool Astarpath::AstarSearch(Vector3d start_pt, Vector3d end_pt) {
 vector<Vector3d> Astarpath::getPath() {
   vector<Vector3d> path;
   vector<MappingNodePtr> front_path;
-do
-{
-terminatePtr->coord=gridIndex2coord(terminatePtr->index);
-front_path.push_back(terminatePtr);
-terminatePtr=terminatePtr->Father;
-}while(terminatePtr->Father!=NULL);
+  do
+  {
+    terminatePtr->coord=gridIndex2coord(terminatePtr->index);
+    front_path.push_back(terminatePtr);
+    terminatePtr=terminatePtr->Father;
+  }while(terminatePtr->Father!=NULL);
+  
   /**
    *
    * STEP 1.3:  追溯找到的路径
    *
    * **/
 
-  // ???
+  // 从终点开始回溯到起点
+  // 注意：前面的循环已经将终点到起点的节点放入了front_path（倒序）
+  // 现在需要将它们反转并放入path中
+  for(int i = front_path.size() - 1; i >= 0; i--) {
+    path.push_back(front_path[i]->coord);
+  }
+  
+  // 添加起点
+  path.push_back(terminatePtr->coord);
 
   return path;
 }
