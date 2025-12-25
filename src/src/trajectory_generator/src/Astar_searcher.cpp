@@ -191,6 +191,35 @@ inline void Astarpath::AstarGetSucc(MappingNodePtr currentPtr,
           continue;
         }
 
+        // 检查是否在障碍物上
+        if (isOccupied(Idx_neighbor(0), Idx_neighbor(1), Idx_neighbor(2))) {
+          continue;
+        }
+
+        // 检查是否穿越对角线障碍
+        if (abs(dx) + abs(dy) + abs(dz) > 1) {  // 如果是对角线移动
+          bool blocked1 = false, blocked2 = false, blocked3 = false;
+          
+          if (dx != 0 && dy != 0) {  // XY平面对角线
+            if (isOccupied(currentPtr->index(0) + dx, currentPtr->index(1), currentPtr->index(2))) blocked1 = true;
+            if (isOccupied(currentPtr->index(0), currentPtr->index(1) + dy, currentPtr->index(2))) blocked2 = true;
+          }
+          
+          if (dx != 0 && dz != 0) {  // XZ平面对角线
+            if (isOccupied(currentPtr->index(0) + dx, currentPtr->index(1), currentPtr->index(2))) blocked1 = true;
+            if (isOccupied(currentPtr->index(0), currentPtr->index(1), currentPtr->index(2) + dz)) blocked3 = true;
+          }
+          
+          if (dy != 0 && dz != 0) {  // YZ平面对角线
+            if (isOccupied(currentPtr->index(0), currentPtr->index(1) + dy, currentPtr->index(2))) blocked2 = true;
+            if (isOccupied(currentPtr->index(0), currentPtr->index(1), currentPtr->index(2) + dz)) blocked3 = true;
+          }
+          
+          if (blocked1 || blocked2 || blocked3) {
+            continue;  // 对角线穿越被阻挡
+          }
+        }
+
         neighborPtrSets.push_back(
             Map_Node[Idx_neighbor(0)][Idx_neighbor(1)][Idx_neighbor(2)]);
         edgeCostSets.push_back(sqrt(dx * dx + dy * dy + dz * dz));
@@ -200,43 +229,53 @@ inline void Astarpath::AstarGetSucc(MappingNodePtr currentPtr,
 }
 
 double Astarpath::getHeu(MappingNodePtr node1, MappingNodePtr node2) {
-  /**
-   *
-   * STEP 1.1: 完成 Astarpath::getHeu
-   * 使用欧几里得距离作为启发函数，添加tie_breaker
-   *
-   * **/
-  double dx = node1->index(0) - node2->index(0);
-  double dy = node1->index(1) - node2->index(1);
-  double dz = node1->index(2) - node2->index(2);
+  // 使用欧几里得距离，避免对角线捷径
+  double dx = fabs(node1->coord(0) - node2->coord(0));
+  double dy = fabs(node1->coord(1) - node2->coord(1));
+  double dz = fabs(node1->coord(2) - node2->coord(2));
   
-  // 使用欧几里得距离
-  double heu = sqrt(dx * dx + dy * dy + dz * dz);
+  // 使用对角线距离，更符合实际移动成本
+  double min_d = min(dx, min(dy, dz));
+  double max_d = max(dx, max(dy, dz));
+  double mid_d = dx + dy + dz - min_d - max_d;
   
-  // 添加tie_breaker，乘以一个很小的系数防止影响距离估计
+  double heu = (sqrt(3.0) - sqrt(2.0)) * min_d + (sqrt(2.0) - 1.0) * mid_d + max_d;
+  
+  // tie_breaker 避免对称
   double tie_breaker = 1.0 + 0.001;
   heu *= tie_breaker;
   
   return heu;
 }
 
-
 bool Astarpath::AstarSearch(Vector3d start_pt, Vector3d end_pt) {
   ros::Time time_1 = ros::Time::now();
+
+  // 重置所有节点状态
+  resetUsedGrids();
 
   // start_point 和 end_point 索引
   Vector3i start_idx = coord2gridIndex(start_pt);
   Vector3i end_idx = coord2gridIndex(end_pt);
   goalIdx = end_idx;
 
-  //start_point 和 end_point 的位置
+  // 检查起点和终点是否在障碍物上
+  if (isOccupied(start_idx(0), start_idx(1), start_idx(2))) {
+    ROS_WARN("Start point is occupied!");
+    return false;
+  }
+  if (isOccupied(end_idx(0), end_idx(1), end_idx(2))) {
+    ROS_WARN("End point is occupied!");
+    return false;
+  }
+
+  // start_point 和 end_point 的位置
   start_pt = gridIndex2coord(start_idx);
   end_pt = gridIndex2coord(end_idx);
 
   // 初始化 struct MappingNode 的指针，分别代表 start node 和 goal node
-  // 
-  MappingNodePtr startPtr = new MappingNode(start_idx, start_pt);
-  MappingNodePtr endPtr = new MappingNode(end_idx, end_pt);
+  MappingNodePtr startPtr = Map_Node[start_idx(0)][start_idx(1)][start_idx(2)];
+  MappingNodePtr endPtr = Map_Node[end_idx(0)][end_idx(1)][end_idx(2)];
 
   // Openset 是通过 STL 库中的 multimap 实现的open_list
   Openset.clear();
@@ -246,89 +285,78 @@ bool Astarpath::AstarSearch(Vector3d start_pt, Vector3d end_pt) {
 
   // 将 Start 节点放在 Open Set 中
   startPtr->g_score = 0;
-  /**
-   *
-   * STEP 1.1:  完成 Astarpath::getHeu
-   *
-   * **/
   startPtr->f_score = getHeu(startPtr, endPtr);
-
-  
-
   startPtr->id = 1;
-  startPtr->coord = start_pt;
-  startPtr -> Father = NULL;
+  startPtr->Father = NULL;
   Openset.insert(make_pair(startPtr->f_score, startPtr));
-
 
   double tentative_g_score;
   vector<MappingNodePtr> neighborPtrSets;
   vector<double> edgeCostSets;
 
-  /**
-   *
-   * STEP 1.2:  完成循环
-   *
-   * **/
+  int expandCount = 0;
+  int max_expand = GRID_X_SIZE * GRID_Y_SIZE * GRID_Z_SIZE;  // 防止无限循环
 
-  while (!Openset.empty()) {
-    //1.弹出g+h最小的节点
-    // 从open set中获取f值最小的节点
-    currentPtr = Openset.begin()->second;
-    Openset.erase(Openset.begin());
+  while (!Openset.empty() && expandCount < max_expand) {
+    expandCount++;
     
-    //2.判断是否是终点
-    // 如果当前节点是目标节点，搜索完成
-    if (currentPtr->index == goalIdx) {
+    // 1. 弹出g+h最小的节点
+    auto it = Openset.begin();
+    currentPtr = it->second;
+    Openset.erase(it);
+    
+    // 2. 判断是否是终点
+    if (currentPtr->index == end_idx) {
       terminatePtr = currentPtr;
       ros::Time time_2 = ros::Time::now();
-      if ((time_2 - time_1).toSec() > 0.1)
-        ROS_WARN("Time consume in Astar path finding is %f",
-                 (time_2 - time_1).toSec());
+      ROS_WARN("A* find path, time consume: %f, expanded nodes: %d", 
+               (time_2 - time_1).toSec(), expandCount);
       return true;
     }
     
-    //3.拓展当前节点
-    // 获取当前节点的所有邻居节点
+    // 标记为已访问
+    if (currentPtr->id == 1) {
+      currentPtr->id = -1;
+    }
+    
+    // 3. 拓展当前节点
     AstarGetSucc(currentPtr, neighborPtrSets, edgeCostSets);
     
-    // 将当前节点标记为已关闭
-    currentPtr->id = -1;
-    
-    for(unsigned int i=0;i<neighborPtrSets.size();i++)
-    {
+    for(unsigned int i = 0; i < neighborPtrSets.size(); i++) {
+      neighborPtr = neighborPtrSets[i];
       
-      if(neighborPtrSets[i]->id==-1)
-      {
-         continue;
+      // 跳过已关闭的节点
+      if(neighborPtr->id == -1) {
+        continue;
       }
-      tentative_g_score=currentPtr->g_score+edgeCostSets[i];
-      neighborPtr=neighborPtrSets[i];
-      if(isOccupied(neighborPtr->index))
-      continue;
-      if(neighborPtr->id==0)
-      {
-        //4.填写信息，完成更新
-        // 新发现的节点，加入open set
+      
+      // 计算新的g值
+      tentative_g_score = currentPtr->g_score + edgeCostSets[i];
+      
+      // 检查障碍物
+      if(isOccupied(neighborPtr->index)) {
+        continue;
+      }
+      
+      if(neighborPtr->id == 0) {  // 新发现的节点
+        // 4. 填写信息，完成更新
         neighborPtr->g_score = tentative_g_score;
         neighborPtr->Father = currentPtr;
         neighborPtr->f_score = tentative_g_score + getHeu(neighborPtr, endPtr);
         neighborPtr->id = 1;
         Openset.insert(make_pair(neighborPtr->f_score, neighborPtr));
-        continue;
       }
-      else if(neighborPtr->id==1)
-      {
-        // 已在open set中，检查是否需要更新路径
+      else if(neighborPtr->id == 1) {  // 已在Open Set中
         if(tentative_g_score < neighborPtr->g_score) {
           // 找到更优路径，更新节点
-          // 先从open set中移除
-          auto it = Openset.find(neighborPtr->f_score);
-          while(it != Openset.end() && it->second != neighborPtr) {
-            ++it;
-          }
-          if(it != Openset.end()) {
-            Openset.erase(it);
+          // 从Openset中移除旧节点
+          pair<double, MappingNodePtr> search_pair(neighborPtr->f_score, neighborPtr);
+          auto range = Openset.equal_range(neighborPtr->f_score);
+          for(auto it = range.first; it != range.second; ++it) {
+            if(it->second == neighborPtr) {
+              Openset.erase(it);
+              break;
+            }
           }
           
           // 更新节点信息
@@ -337,109 +365,116 @@ bool Astarpath::AstarSearch(Vector3d start_pt, Vector3d end_pt) {
           neighborPtr->f_score = tentative_g_score + getHeu(neighborPtr, endPtr);
           Openset.insert(make_pair(neighborPtr->f_score, neighborPtr));
         }
-      continue;
       }
     }
   }
 
   ros::Time time_2 = ros::Time::now();
   if ((time_2 - time_1).toSec() > 0.1)
-    ROS_WARN("Time consume in Astar path finding is %f",
-             (time_2 - time_1).toSec());
+    ROS_WARN("Time consume in Astar path finding is %f, expanded nodes: %d",
+             (time_2 - time_1).toSec(), expandCount);
   return false;
 }
-
 
 vector<Vector3d> Astarpath::getPath() {
   vector<Vector3d> path;
   vector<MappingNodePtr> front_path;
-  do
-  {
-    terminatePtr->coord=gridIndex2coord(terminatePtr->index);
-    front_path.push_back(terminatePtr);
-    terminatePtr=terminatePtr->Father;
-  }while(terminatePtr->Father!=NULL);
   
-  /**
-   *
-   * STEP 1.3:  追溯找到的路径
-   *
-   * **/
-
-  // 从终点开始回溯到起点
-  // 注意：前面的循环已经将终点到起点的节点放入了front_path（倒序）
-  // 现在需要将它们反转并放入path中
-  for(int i = front_path.size() - 1; i >= 0; i--) {
-    path.push_back(front_path[i]->coord);
+  if (terminatePtr == NULL) {
+    ROS_WARN("No path found!");
+    return path;
   }
   
-  // 添加起点
-  path.push_back(terminatePtr->coord);
-
+  // 从终点回溯到起点
+  MappingNodePtr node = terminatePtr;
+  while (node != NULL) {
+    front_path.push_back(node);
+    node = node->Father;
+  }
+  
+  // 反转路径
+  for (auto it = front_path.rbegin(); it != front_path.rend(); ++it) {
+    path.push_back((*it)->coord);
+  }
+  
   return path;
 }
 
-
 std::vector<Vector3d> Astarpath::pathSimplify(const vector<Vector3d> &path,
                                                double path_resolution) {
+  if (path.size() <= 2) {
+    return path;
+  }
 
-  //init
-  double dmax=0,d;
-  int index=0;
-  int end = path.size();
-  //1.计算距离首尾连成直线最大的点，并将点集从此处分开
-  for(int i=1;i<end-1;i++)
-  {
-    d=perpendicularDistance(path[i],path[0],path[end-1]);
-    if(d>dmax)
-    {
-      index=i;
-      dmax=d;
+  // 检查路径上是否有障碍物
+  for (size_t i = 0; i < path.size() - 1; i++) {
+    Vector3d start = path[i];
+    Vector3d end = path[i+1];
+    
+    // 沿线段采样检查
+    double dist = (end - start).norm();
+    int steps = int(dist / resolution) + 1;
+    
+    for (int j = 1; j < steps; j++) {
+      double t = double(j) / steps;
+      Vector3d sample_point = start + (end - start) * t;
+      if (isOccupied(coord2gridIndex(sample_point))) {
+        // 如果路径上有障碍物，不进行简化
+        return path;
+      }
     }
   }
-  vector<Vector3d> subPath1;
-  int j = 0;
-  while(j<index+1){
-    subPath1.push_back(path[j]);
-    j++;
+
+  // 原来的简化逻辑
+  double dmax = 0, d;
+  int index = 0;
+  int end_idx = path.size();
+  
+  for(int i = 1; i < end_idx - 1; i++) {
+    d = perpendicularDistance(path[i], path[0], path[end_idx-1]);
+    if(d > dmax) {
+      index = i;
+      dmax = d;
+    }
   }
-  vector<Vector3d> subPath2;
-   while(j<int(path.size())){
-    subPath2.push_back(path[j]);
-    j++;
-  }
-  //2.拆分点集
-  vector<Vector3d> recPath1;
-  vector<Vector3d> recPath2;
-  vector<Vector3d> resultPath;
-  if(dmax>path_resolution)
-  {
-    recPath1=pathSimplify(subPath1,path_resolution);
-    recPath2=pathSimplify(subPath2,path_resolution);
-   for(int i=0;i<int(recPath1.size());i++){
-    resultPath.push_back(recPath1[i]);
-  }
-     for(int i=0;i<int(recPath2.size());i++){
-    resultPath.push_back(recPath2[i]);
-  }
-  }else{
-    if(path.size()>1){
-      resultPath.push_back(path[0]);
-      resultPath.push_back(path[end-1]);
-    }else{
-      resultPath.push_back(path[0]);
+  
+  if(dmax > path_resolution) {
+    vector<Vector3d> subPath1;
+    vector<Vector3d> subPath2;
+    
+    for(int j = 0; j <= index; j++) {
+      subPath1.push_back(path[j]);
     }
     
+    for(int j = index; j < end_idx; j++) {
+      subPath2.push_back(path[j]);
+    }
+    
+    vector<Vector3d> recPath1 = pathSimplify(subPath1, path_resolution);
+    vector<Vector3d> recPath2 = pathSimplify(subPath2, path_resolution);
+    
+    vector<Vector3d> resultPath;
+    for(size_t i = 0; i < recPath1.size() - 1; i++) {  // 避免重复中间点
+      resultPath.push_back(recPath1[i]);
+    }
+    for(size_t i = 0; i < recPath2.size(); i++) {
+      resultPath.push_back(recPath2[i]);
+    }
+    return resultPath;
+  } else {
+    vector<Vector3d> resultPath;
+    resultPath.push_back(path[0]);
+    resultPath.push_back(path[end_idx-1]);
+    return resultPath;
   }
-
-  return resultPath;
 }
 
-double Astarpath::perpendicularDistance(const Eigen::Vector3d point_insert,const Eigen:: Vector3d point_st,const Eigen::Vector3d point_end)
-{
-  Vector3d line1=point_end-point_st;
-  Vector3d line2=point_insert-point_st;
-  return double(line2.cross(line1).norm()/line1.norm());
+double Astarpath::perpendicularDistance(const Eigen::Vector3d point_insert,
+                                        const Eigen::Vector3d point_st,
+                                        const Eigen::Vector3d point_end) {
+  Vector3d line1 = point_end - point_st;
+  Vector3d line2 = point_insert - point_st;
+  return double(line2.cross(line1).norm() / line1.norm());
 }
 
 Vector3d Astarpath::getPosPoly(MatrixXd polyCoeff, int k, double t) {
@@ -456,44 +491,43 @@ Vector3d Astarpath::getPosPoly(MatrixXd polyCoeff, int k, double t) {
         time(j) = pow(t, j);
 
     ret(dim) = coeff.dot(time);
-    // cout << "dim:" << dim << " coeff:" << coeff << endl;
   }
 
   return ret;
 }
 
-
 int Astarpath::safeCheck(MatrixXd polyCoeff, VectorXd time) {
   int unsafe_segment = -1; //-1 -> the whole trajectory is safe
 
-  double delta_t=resolution/1.0;//conservative advance step size;
+  double delta_t = resolution / 1.0; // conservative advance step size
   double t = delta_t;
   Vector3d advancePos;
-  for(int i=0;i<polyCoeff.rows();i++)
-  {
-    while(t<time(i)){
-     advancePos=getPosPoly(polyCoeff,i,t) ;
-     if(isOccupied(coord2gridIndex(advancePos))){
-       unsafe_segment=i;
-       break;
-     }   
-     t+=delta_t;
+  
+  for(int i = 0; i < polyCoeff.rows(); i++) {
+    while(t < time(i)) {
+      advancePos = getPosPoly(polyCoeff, i, t);
+      if(isOccupied(coord2gridIndex(advancePos))) {
+        unsafe_segment = i;
+        break;
+      }   
+      t += delta_t;
     }
-    if(unsafe_segment!=-1){
-
+    if(unsafe_segment != -1) {
       break;
-    }else{
-      t=delta_t;
+    } else {
+      t = delta_t;
     }
   }
   return unsafe_segment;
 }
 
-void Astarpath::resetOccupy(){
-  for (int i = 0; i < GRID_X_SIZE; i++)
-for (int j = 0; j < GRID_Y_SIZE; j++)
-  for (int k = 0; k < GRID_Z_SIZE; k++) {
-    data[i * GLYZ_SIZE + j * GRID_Z_SIZE + k] = 0;
-    data_raw[i * GLYZ_SIZE + j * GRID_Z_SIZE + k] = 0;
+void Astarpath::resetOccupy() {
+  for (int i = 0; i < GRID_X_SIZE; i++) {
+    for (int j = 0; j < GRID_Y_SIZE; j++) {
+      for (int k = 0; k < GRID_Z_SIZE; k++) {
+        data[i * GLYZ_SIZE + j * GRID_Z_SIZE + k] = 0;
+        data_raw[i * GLYZ_SIZE + j * GRID_Z_SIZE + k] = 0;
+      }
+    }
   }
 }
